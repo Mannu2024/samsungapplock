@@ -1,209 +1,318 @@
-// Store is loaded globally
+const videoUrlInput = document.getElementById('video-url');
+const loadVideoButton = document.getElementById('load-video');
+const videoStatus = document.getElementById('video-status');
+const videoPlayer = document.getElementById('video-player');
+const videoMeta = document.getElementById('video-meta');
+const timeline = document.getElementById('timeline');
+const currentTimeLabel = document.getElementById('current-time');
+const durationLabel = document.getElementById('duration');
+const downloadButton = document.getElementById('download-video');
+const directDownload = document.getElementById('direct-download');
+const downloadProgress = document.getElementById('download-progress');
+const downloadPercent = document.getElementById('download-percent');
+const downloadSize = document.getElementById('download-size');
+const clipStartInput = document.getElementById('clip-start');
+const clipEndInput = document.getElementById('clip-end');
+const setStartButton = document.getElementById('set-start');
+const setEndButton = document.getElementById('set-end');
+const recordButton = document.getElementById('record-section');
+const stopRecordButton = document.getElementById('stop-record');
+const recordStatus = document.getElementById('record-status');
+const clipList = document.getElementById('clip-list');
 
+let activeStream = null;
+let recorder = null;
+let recordTimer = null;
+let recordedChunks = [];
 
-class App {
-    constructor() {
-        this.currentInput = '';
-        this.dom = {
-            views: {
-                lock: document.getElementById('view-lock'),
-                dashboard: document.getElementById('view-dashboard'),
-                settings: document.getElementById('view-settings'),
-            },
-            pinDots: document.querySelectorAll('.pin-dot'),
-            keypad: document.querySelector('.keypad'),
-            appList: document.getElementById('app-list'),
-            searchInput: document.getElementById('app-search'),
-            subtitle: document.querySelector('.subtitle'),
-            biometricBtn: document.getElementById('btn-biometric'),
-            settingsBtn: document.getElementById('btn-settings'),
-            backSettingsBtn: document.getElementById('btn-back-settings'),
+const formatTime = (timeSeconds) => {
+    if (!Number.isFinite(timeSeconds)) {
+        return '00:00';
+    }
+    const minutes = Math.floor(timeSeconds / 60);
+    const seconds = Math.floor(timeSeconds % 60);
+    return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+};
 
-            // Settings Toggles
-            toggleIntruder: document.getElementById('toggle-intruder'),
-            toggleFakeCrash: document.getElementById('toggle-fakecrash'),
+const parseTimeInput = (value) => {
+    if (!value) {
+        return null;
+    }
+    const parts = value.split(':').map((part) => Number(part));
+    if (parts.some((part) => Number.isNaN(part))) {
+        return null;
+    }
+    if (parts.length === 1) {
+        return parts[0];
+    }
+    if (parts.length === 2) {
+        return parts[0] * 60 + parts[1];
+    }
+    if (parts.length === 3) {
+        return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    }
+    return null;
+};
+
+const updateStatus = (element, message, type = 'default') => {
+    element.textContent = message;
+    element.classList.remove('success', 'error');
+    if (type === 'success') {
+        element.classList.add('success');
+    }
+    if (type === 'error') {
+        element.classList.add('error');
+    }
+};
+
+const updateTimeline = () => {
+    const duration = videoPlayer.duration || 0;
+    const current = videoPlayer.currentTime || 0;
+    currentTimeLabel.textContent = formatTime(current);
+    durationLabel.textContent = formatTime(duration);
+    if (duration > 0) {
+        timeline.value = ((current / duration) * 100).toFixed(2);
+    } else {
+        timeline.value = 0;
+    }
+};
+
+const enableControls = (isEnabled) => {
+    downloadButton.disabled = !isEnabled;
+    setStartButton.disabled = !isEnabled;
+    setEndButton.disabled = !isEnabled;
+    recordButton.disabled = !isEnabled;
+    directDownload.classList.toggle('disabled', !isEnabled);
+    if (!isEnabled) {
+        directDownload.removeAttribute('href');
+    }
+};
+
+const resetDownloadUI = () => {
+    downloadProgress.style.width = '0%';
+    downloadPercent.textContent = '0%';
+    downloadSize.textContent = '0 MB';
+};
+
+const validateMp4Url = (url) => {
+    if (!url) {
+        return { valid: false, reason: 'Please enter a video URL.' };
+    }
+    if (!url.startsWith('http')) {
+        return { valid: false, reason: 'URL must start with http or https.' };
+    }
+    if (!url.toLowerCase().includes('.mp4')) {
+        return { valid: false, reason: 'Link must point to a direct MP4 file.' };
+    }
+    return { valid: true };
+};
+
+const loadVideo = async () => {
+    const url = videoUrlInput.value.trim();
+    const validation = validateMp4Url(url);
+    if (!validation.valid) {
+        updateStatus(videoStatus, validation.reason, 'error');
+        enableControls(false);
+        videoPlayer.removeAttribute('src');
+        return;
+    }
+
+    updateStatus(videoStatus, 'Validating stream...', 'default');
+    resetDownloadUI();
+    enableControls(false);
+
+    videoPlayer.pause();
+    videoPlayer.src = url;
+    videoPlayer.load();
+
+    const canPlay = videoPlayer.canPlayType('video/mp4');
+    if (!canPlay) {
+        updateStatus(videoStatus, 'This browser cannot play MP4 files. Please use Chrome.', 'error');
+        return;
+    }
+
+    try {
+        await videoPlayer.play();
+        videoPlayer.pause();
+        updateStatus(videoStatus, 'MP4 stream loaded. Ready to play.', 'success');
+        videoMeta.textContent = 'MP4 stream ready';
+        enableControls(true);
+        directDownload.href = url;
+        updateTimeline();
+    } catch (error) {
+        updateStatus(videoStatus, 'Unable to play this MP4. Check the link and permissions.', 'error');
+        videoMeta.textContent = 'Stream unavailable';
+    }
+};
+
+const downloadVideo = async () => {
+    const url = videoPlayer.src;
+    if (!url) {
+        return;
+    }
+
+    resetDownloadUI();
+    updateStatus(videoStatus, 'Starting download...', 'default');
+
+    try {
+        const response = await fetch(url);
+        if (!response.ok || !response.body) {
+            throw new Error('Unable to stream file.');
+        }
+        const totalBytes = Number(response.headers.get('content-length')) || 0;
+        const reader = response.body.getReader();
+        let receivedBytes = 0;
+        const chunks = [];
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) {
+                break;
+            }
+            chunks.push(value);
+            receivedBytes += value.length;
+            if (totalBytes) {
+                const percent = Math.round((receivedBytes / totalBytes) * 100);
+                downloadProgress.style.width = `${percent}%`;
+                downloadPercent.textContent = `${percent}%`;
+                downloadSize.textContent = `${(totalBytes / (1024 * 1024)).toFixed(2)} MB`;
+            } else {
+                downloadPercent.textContent = '...';
+                downloadSize.textContent = `${(receivedBytes / (1024 * 1024)).toFixed(2)} MB`; 
+            }
+        }
+
+        const blob = new Blob(chunks, { type: 'video/mp4' });
+        const objectUrl = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = objectUrl;
+        anchor.download = 'video.mp4';
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(objectUrl);
+
+        updateStatus(videoStatus, 'Download completed.', 'success');
+    } catch (error) {
+        updateStatus(videoStatus, 'Download failed. The server may block cross-origin downloads.', 'error');
+    }
+};
+
+const startRecording = async () => {
+    if (!videoPlayer.src) {
+        updateStatus(recordStatus, 'Load an MP4 before recording.', 'error');
+        return;
+    }
+
+    const startTime = parseTimeInput(clipStartInput.value);
+    const endTime = parseTimeInput(clipEndInput.value);
+    if (startTime === null || endTime === null || endTime <= startTime) {
+        updateStatus(recordStatus, 'Enter valid start/end times (end must be after start).', 'error');
+        return;
+    }
+
+    try {
+        if (!activeStream) {
+            activeStream = videoPlayer.captureStream();
+        }
+        const preferredTypes = [
+            'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+            'video/mp4',
+            'video/webm;codecs=vp9,opus',
+            'video/webm'
+        ];
+        const mimeType = preferredTypes.find((type) => MediaRecorder.isTypeSupported(type)) || '';
+        recorder = new MediaRecorder(activeStream, mimeType ? { mimeType } : undefined);
+        recordedChunks = [];
+
+        recorder.ondataavailable = (event) => {
+            if (event.data.size > 0) {
+                recordedChunks.push(event.data);
+            }
         };
 
-        this.init();
-    }
+        recorder.onstop = () => {
+            const blob = new Blob(recordedChunks, { type: mimeType || 'video/webm' });
+            const clipUrl = URL.createObjectURL(blob);
+            const clipItem = document.createElement('div');
+            clipItem.className = 'clip-item';
 
-    init() {
-        this.renderKeypad();
-        this.renderAppList();
-        this.updateStats();
-        this.setupEventListeners();
-        this.loadSettingsUI();
+            const label = document.createElement('span');
+            label.textContent = `Clip ${formatTime(startTime)} - ${formatTime(endTime)}`;
 
-        // Initial state
-        this.resetPin();
-    }
+            const downloadLink = document.createElement('a');
+            const extension = mimeType.includes('mp4') ? 'mp4' : 'webm';
+            downloadLink.href = clipUrl;
+            downloadLink.download = `clip-${formatTime(startTime)}-${formatTime(endTime)}.${extension}`;
+            downloadLink.textContent = 'Save clip';
 
-    setupEventListeners() {
-        // App Search
-        this.dom.searchInput.addEventListener('input', (e) => {
-            this.renderAppList(e.target.value);
-        });
+            clipItem.append(label, downloadLink);
+            clipList.prepend(clipItem);
 
-        // Navigation
-        this.dom.settingsBtn.addEventListener('click', () => this.switchView('settings'));
-        this.dom.backSettingsBtn.addEventListener('click', () => this.switchView('dashboard'));
+            updateStatus(recordStatus, 'Recording complete. Save your clip below.', 'success');
+            stopRecordButton.disabled = true;
+            recordButton.disabled = false;
+        };
 
-        // Biometric Simulation
-        this.dom.biometricBtn.addEventListener('click', () => {
-            this.dom.biometricBtn.innerHTML = '<span>Scanning...</span>';
-            setTimeout(() => {
-                this.unlockApp();
-                this.dom.biometricBtn.innerHTML = `
-                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12C2 17.5 6.5 22 12 22C17.5 22 22 17.5 22 12C22 6.5 17.5 2 12 2C6.5 2 2 6.5 2 12Z"></path><path d="M12 8.5C12.8 8.5 13.5 9.2 13.5 10C13.5 10.8 12.8 11.5 12 11.5C11.2 11.5 10.5 10.8 10.5 10C10.5 9.2 11.2 8.5 12 8.5Z"></path><path d="M12 15.5C13.5 15.5 14.8 15 15.5 14.1C16.2 13.2 17 12 17 10.5C17 7.5 14.8 5 12 5C9.2 5 7 7.5 7 10.5C7 12 7.8 13.2 8.5 14.1C9.2 15 10.5 15.5 12 15.5Z"></path></svg>
-                    <span>Use Fingerprint</span>
-                `;
-            }, 1000);
-        });
+        videoPlayer.currentTime = startTime;
+        await videoPlayer.play();
+        recorder.start();
+        recordButton.disabled = true;
+        stopRecordButton.disabled = false;
+        updateStatus(recordStatus, 'Recording section in progress...', 'default');
 
-        // Settings Toggles
-        this.dom.toggleIntruder.addEventListener('change', (e) => Store.updateSetting('intruderSelfie', e.target.checked));
-        this.dom.toggleFakeCrash.addEventListener('change', (e) => Store.updateSetting('fakeCrash', e.target.checked));
-    }
-
-    /* --- LOCK SCREEN LOGIC --- */
-    renderKeypad() {
-        const keys = [1, 2, 3, 4, 5, 6, 7, 8, 9, '', 0, 'del'];
-        this.dom.keypad.innerHTML = '';
-
-        keys.forEach(key => {
-            const btn = document.createElement('button');
-            btn.className = 'key-btn';
-
-            if (key === 'del') {
-                btn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 4H8l-7 8 7 8h13a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z"></path><line x1="18" y1="9" x2="12" y2="15"></line><line x1="12" y1="9" x2="18" y2="15"></line></svg>';
-                btn.onclick = () => this.handlePinInput('del');
-            } else if (key === '') {
-                btn.style.visibility = 'hidden';
-                btn.disabled = true;
-            } else {
-                btn.textContent = key;
-                btn.onclick = () => this.handlePinInput(key);
+        recordTimer = window.setInterval(() => {
+            if (videoPlayer.currentTime >= endTime) {
+                stopRecording();
             }
-
-            this.dom.keypad.appendChild(btn);
-        });
+        }, 200);
+    } catch (error) {
+        updateStatus(recordStatus, 'Recording failed. Ensure playback is allowed in this tab.', 'error');
     }
+};
 
-    handlePinInput(key) {
-        if (key === 'del') {
-            this.currentInput = this.currentInput.slice(0, -1);
-        } else {
-            if (this.currentInput.length < 4) {
-                this.currentInput += key;
-            }
-        }
-
-        this.updatePinDisplay();
-
-        if (this.currentInput.length === 4) {
-            setTimeout(() => this.checkPin(), 100);
-        }
+const stopRecording = () => {
+    if (recordTimer) {
+        window.clearInterval(recordTimer);
+        recordTimer = null;
     }
-
-    updatePinDisplay() {
-        this.dom.pinDots.forEach((dot, index) => {
-            dot.classList.toggle('filled', index < this.currentInput.length);
-            dot.classList.remove('error');
-        });
+    if (recorder && recorder.state !== 'inactive') {
+        recorder.stop();
     }
+    videoPlayer.pause();
+};
 
-    checkPin() {
-        if (Store.verifyPin(this.currentInput)) {
-            this.unlockApp();
-        } else {
-            this.showError();
-        }
+loadVideoButton.addEventListener('click', loadVideo);
+videoUrlInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+        loadVideo();
     }
-
-    showError() {
-        this.dom.pinDots.forEach(dot => dot.classList.add('error'));
-        // navigator.vibrate(200); // Mobile only
-        setTimeout(() => {
-            this.resetPin();
-        }, 500);
-    }
-
-    resetPin() {
-        this.currentInput = '';
-        this.updatePinDisplay();
-    }
-
-    unlockApp() {
-        Store.state.isAuthenticated = true;
-        this.switchView('dashboard');
-        this.resetPin();
-    }
-
-    /* --- DASHBOARD LOGIC --- */
-    renderAppList(filterText = '') {
-        this.dom.appList.innerHTML = '';
-
-        Store.apps.filter(app => {
-            return app.name.toLowerCase().includes(filterText.toLowerCase());
-        }).forEach(app => {
-            const el = document.createElement('div');
-            el.className = 'app-item';
-            el.innerHTML = `
-                <div class="app-info">
-                    ${this.generateAppIcon(app)}
-                    <span class="app-name">${app.name}</span>
-                </div>
-                <label class="switch">
-                    <input type="checkbox" ${app.locked ? 'checked' : ''} data-id="${app.id}">
-                    <span class="slider round"></span>
-                </label>
-            `;
-
-            // Add event listener to checkbox
-            const checkbox = el.querySelector('input');
-            checkbox.addEventListener('change', (e) => {
-                const isLocked = Store.toggleAppLock(app.id);
-                this.updateStats();
-            });
-
-            this.dom.appList.appendChild(el);
-        });
-    }
-
-    generateAppIcon(app) {
-        // Generate a colored SVG data URI
-        const svg = `
-        <svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="0 0 40 40">
-            <rect width="40" height="40" fill="${app.color}"/>
-            <text x="50%" y="55%" dominant-baseline="middle" text-anchor="middle" font-family="sans-serif" font-weight="bold" font-size="20" fill="white">${app.name[0]}</text>
-        </svg>`;
-        const encoded = 'data:image/svg+xml;base64,' + btoa(svg);
-        return `<img src="${encoded}" class="app-icon" alt="${app.name}" />`;
-    }
-
-    updateStats() {
-        const count = Store.getLockedCount();
-        this.dom.subtitle.textContent = `${count} app${count === 1 ? '' : 's'} locked`;
-    }
-
-    /* --- VIEW MANAGEMENT --- */
-    switchView(viewName) {
-        // Hide all
-        Object.values(this.dom.views).forEach(el => el.classList.remove('active'));
-
-        // Show target
-        if (this.dom.views[viewName]) {
-            this.dom.views[viewName].classList.add('active');
-        }
-    }
-
-    loadSettingsUI() {
-        this.dom.toggleIntruder.checked = Store.state.intruderSelfie;
-        this.dom.toggleFakeCrash.checked = Store.state.fakeCrash;
-    }
-}
-
-// Start
-document.addEventListener('DOMContentLoaded', () => {
-    new App();
 });
+
+videoPlayer.addEventListener('loadedmetadata', updateTimeline);
+videoPlayer.addEventListener('timeupdate', updateTimeline);
+videoPlayer.addEventListener('ended', updateTimeline);
+
+timeline.addEventListener('input', (event) => {
+    const percent = Number(event.target.value);
+    if (videoPlayer.duration) {
+        videoPlayer.currentTime = (percent / 100) * videoPlayer.duration;
+    }
+});
+
+downloadButton.addEventListener('click', downloadVideo);
+
+setStartButton.addEventListener('click', () => {
+    clipStartInput.value = formatTime(videoPlayer.currentTime);
+});
+
+setEndButton.addEventListener('click', () => {
+    clipEndInput.value = formatTime(videoPlayer.currentTime);
+});
+
+recordButton.addEventListener('click', startRecording);
+stopRecordButton.addEventListener('click', stopRecording);
+
+enableControls(false);
+resetDownloadUI();
+updateTimeline();
