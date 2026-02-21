@@ -1,0 +1,46 @@
+version: "3.9"
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: text_to_teaching_video
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      API_PORT: 4000
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/text_to_teaching_video
+      REDIS_URL: redis://redis:6379
+    depends_on: [postgres, redis]
+    ports:
+      - "4000:4000"
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/text_to_teaching_video
+      REDIS_URL: redis://redis:6379
+    depends_on: [postgres, redis, api]
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    environment:
+      NEXT_PUBLIC_API_URL: http://api:4000
+    depends_on: [api]
+    ports:
+      - "3000:3000"
+volumes:
+  pgdata:

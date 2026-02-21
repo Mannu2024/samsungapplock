@@ -1,0 +1,11 @@
+{
+  "name": "text-to-teaching-video",
+  "private": true,
+  "packageManager": "pnpm@9.12.3",
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm -r --parallel dev",
+    "test": "pnpm -r test",
+    "lint": "pnpm -r lint"
+  }
+}
